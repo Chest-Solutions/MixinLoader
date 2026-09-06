@@ -30,11 +30,11 @@ While MixinLoader can successfully load and execute plugins designed for **Ignit
 
 Installing MixinLoader is as simple as installing any other Paper plugin. **No modifications to your startup scripts are required.**
 
-1. **Download** the latest `MixinLoader.jar`.
+1. **Download** the latest `MixinLoader-1.0.0-all.jar`.
 2. **Drop it** into your server's `plugins/` folder.
 3. **Start your server** exactly as you normally would:
    ```bash
-   java -jar paper-server.jar
+   java -jar server.jar
    ```
 
 Upon startup, the plugin will detect that it is not running as a Java agent. It will cleanly close the server's listening sockets to prevent port-binding conflicts, and seamlessly relaunch the JVM with itself injected as a `-javaagent` before the server fully loads.
@@ -59,8 +59,8 @@ This project uses Gradle for dependency management.
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-username/mixinloader.git
-cd mixinloader
+git clone https://github.com/Chest-Solutions/MixinLoader.git
+cd MixinLoader
 
 # Build the project
 ./gradlew build
