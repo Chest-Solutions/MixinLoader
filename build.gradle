@@ -5,8 +5,8 @@ import java.util.Map as JMap
 
 plugins {
     id("java")
-    id("xyz.jpenilla.run-paper") version("3.0.2")
-    id("com.gradleup.shadow") version("9.4.1")
+    id("xyz.jpenilla.run-paper") version("3.1.0")
+    id("com.gradleup.shadow") version("9.6.1")
 }
 
 group = "dev.csl"
@@ -60,6 +60,7 @@ tasks.jar {
 
 tasks.shadowJar {
     mergeServiceFiles()
+    duplicatesStrategy = DuplicatesStrategy.INCLUDE
     relocate("net.fabricmc.mappingio", "dev.csl.mixinloader.shadow.mappingio")
 }
 

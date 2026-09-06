@@ -135,7 +135,7 @@ public final class MixinBootstrapper {
 	public static @NotNull LaunchArguments getArgs() {
 		List<String> jvm = new ArrayList<>();
 		List<String> prog = new ArrayList<>();
-		Path jar = Path.of("file:///C:");
+		Path jar = null;
 		Optional<String[]> allArgs = ProcessHandle.current().info().arguments();
 		if (allArgs.isPresent()) {
 			boolean nextJar = false;
