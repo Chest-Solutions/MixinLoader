@@ -1,6 +1,6 @@
 name: MixinLoader
-version: '1.0-SNAPSHOT'
+version: "${version}"
 main: dev.csl.mixinloader.MixinLegacyBootstrapper
 loader: dev.csl.mixinloader.MixinModernBootstrapper
-api-version: '1.19'
+api-version: "1.19"
 load: STARTUP
