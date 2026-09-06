@@ -1,8 +1,7 @@
 package dev.csl.mixinloader;
 
-import com.sun.jna.Library;
-import com.sun.jna.Native;
-import com.sun.jna.StringArray;
+import com.sun.jna.*;
+import com.sun.jna.platform.mac.SystemB;
 import dev.csl.mixinloader.util.SneakyExceptions;
 import org.apache.commons.lang3.SystemUtils;
 import org.jetbrains.annotations.NotNull;
@@ -16,6 +15,9 @@ import java.util.Optional;
 
 public final class MixinBootstrapper {
 	public record LaunchArguments(List<String> jvmArgs, List<String> programArgs, Path jar){}
+
+	private static final int PROC_FD_INFO_SIZE = new SystemB.ProcFdInfo().size();
+	private static final int SOCKET_INFO_SIZE = new SystemB.SocketInfo().size();
 
 	@SuppressWarnings("UnusedReturnValue")
     public interface LibC extends Library {
@@ -34,36 +36,12 @@ public final class MixinBootstrapper {
 	public static void checkBootAndLoadMixinLoader() {
 		if (Boolean.getBoolean("mixinloader.loaded")) return;
 
-		if (SystemUtils.IS_OS_UNIX) {
-			Path fdPath = Path.of("/proc/self/fd");
-			if (!Files.exists(fdPath)) return;
-
-			try (var stream = Files.list(fdPath)) {
-				stream.forEach(path -> {
-					try {
-						int fd = Integer.parseInt(path.getFileName().toString());
-						if (fd <= 2) return; // Skip stdin, stdout, stderr
-
-						// Read the symlink destination (e.g., "socket:[123456]")
-						String target = Files.readSymbolicLink(path).toString();
-						if (target.startsWith("socket:")) {
-							LibC.INSTANCE.close(fd);
-							System.out.println("[MixinLoader] Safely closed socket FD: " + fd + " (" + target + ")");
-						}
-					} catch (Throwable ignored) {}
-				});
-			} catch (Throwable ignored) {}
-
-			LibC.INSTANCE.execvp(
-					getJavaExecutable(),
-					new StringArray(
-							getCommand()
-									.toArray(new String[0])
-					)
-			);
-			System.err.println("execv failed with result, errno=" + Native.getLastError());
-		} else if (SystemUtils.IS_OS_WINDOWS) {
+		if (SystemUtils.IS_OS_WINDOWS) {
 			closeAllWindowsListeningSockets();
+		} else if (SystemUtils.IS_OS_MAC) {
+			closeAllMacListeningSockets();
+		} else if (SystemUtils.IS_OS_LINUX) {
+			closeAllLinuxListeningSockets();
 		}
 
 		ProcessBuilder pb = getProcessBuilder();
@@ -95,6 +73,71 @@ public final class MixinBootstrapper {
 				System.out.println("[MixinLoader] Released Windows listening socket handle: " + h);
 			}
 		}
+	}
+
+	private static void closeAllMacListeningSockets() {
+		SystemB sysB = SystemB.INSTANCE;
+		int pid = (int) ProcessHandle.current().pid();
+
+		int bufSize = sysB.proc_pidinfo(pid, SystemB.PROC_PIDLISTFDS, 0, null, 0);
+		if (bufSize <= 0) return;
+
+		int count = bufSize / PROC_FD_INFO_SIZE;
+		SystemB.ProcFdInfo[] fdArray = (SystemB.ProcFdInfo[]) new SystemB.ProcFdInfo().toArray(count);
+
+		int r = sysB.proc_pidinfo(pid, SystemB.PROC_PIDLISTFDS, 0, fdArray[0], bufSize);
+		if (r <= 0) return;
+
+		SystemB.SocketInfo sockInfo = new SystemB.SocketInfo();
+
+		for (int i = 0; i < count; i++) {
+			fdArray[i].read();
+
+			if (fdArray[i].proc_fdtype != SystemB.PROX_FDTYPE_SOCKET || fdArray[i].proc_fd <= 2)
+				continue;
+
+			r = sysB.proc_pidfdinfo(pid, fdArray[i].proc_fd,
+				SystemB.PROC_PIDFDSOCKETINFO, sockInfo, SOCKET_INFO_SIZE);
+			if (r <= 0) continue;
+
+			if (sockInfo.soi_kind != SystemB.SOCKINFO_TCP) continue;
+			if (sockInfo.soi_proto.pri_in.insi_fport != 0) continue;
+
+			int lport = sockInfo.soi_proto.pri_in.insi_lport;
+			int port = (lport & 0xFF) << 8 | (lport >> 8 & 0xFF);
+			System.out.println("[MixinLoader] Closed listening socket FD: " + fdArray[i].proc_fd + " port=" + port);
+			sysB.close(fdArray[i].proc_fd);
+		}
+	}
+
+	private static void closeAllLinuxListeningSockets() {
+		Path fdPath = Path.of("/proc/self/fd");
+		if (!Files.exists(fdPath)) return;
+
+		try (var stream = Files.list(fdPath)) {
+			stream.forEach(path -> {
+				try {
+					int fd = Integer.parseInt(path.getFileName().toString());
+					if (fd <= 2) return; // Skip stdin, stdout, stderr
+
+					// Read the symlink destination (e.g., "socket:[123456]")
+					String target = Files.readSymbolicLink(path).toString();
+					if (target.startsWith("socket:")) {
+						LibC.INSTANCE.close(fd);
+						System.out.println("[MixinLoader] Safely closed socket FD: " + fd + " (" + target + ")");
+					}
+				} catch (Throwable ignored) {}
+			});
+		} catch (Throwable ignored) {}
+
+		LibC.INSTANCE.execvp(
+			getJavaExecutable(),
+			new StringArray(
+				getCommand()
+					.toArray(new String[0])
+			)
+		);
+		System.err.println("execv failed with result, errno=" + Native.getLastError());
 	}
 
 	private static @NotNull ProcessBuilder getProcessBuilder() {
