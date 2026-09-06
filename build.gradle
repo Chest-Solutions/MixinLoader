@@ -1,0 +1,90 @@
+//file:noinspection VulnerableLibrariesLocal
+//file:noinspection GroovyAssignabilityCheck
+import java.util.List as JList
+import java.util.Map as JMap
+
+plugins {
+    id("java")
+    id("xyz.jpenilla.run-paper") version("3.0.2")
+    id("com.gradleup.shadow") version("9.4.1")
+}
+
+group = "dev.csl"
+version = "1.0-SNAPSHOT"
+
+repositories {
+    mavenCentral()
+    maven {
+        name = "PaperMC"
+        url = uri("https://repo.papermc.io/repository/maven-public/")
+    }
+}
+
+dependencies {
+    compileOnly("io.papermc.paper:paper-api:1.19.3-R0.1-SNAPSHOT")
+    compileOnly("net.java.dev.jna:jna-platform:5.19.1")
+    compileOnly("io.papermc:paperclip:3.0.3")
+
+    implementation("net.fabricmc:access-widener:2.1.0")
+    implementation("net.fabricmc:sponge-mixin:0.17.4+mixin.0.8.7")
+    annotationProcessor("net.fabricmc:sponge-mixin:0.17.4+mixin.0.8.7")
+    implementation("io.github.llamalad7:mixinextras-common:0.5.4")
+    annotationProcessor("io.github.llamalad7:mixinextras-common:0.5.4")
+
+    implementation("xyz.jpenilla:reflection-remapper:0.1.2")
+
+    implementation("net.bytebuddy:byte-buddy:1.18.13")
+}
+
+tasks {
+    runServer {
+        javaLauncher.set(project.javaToolchains.launcherFor {
+            languageVersion = JavaLanguageVersion.of(17)
+        })
+
+
+        minecraftVersion("1.19.3")
+    }
+}
+
+tasks.jar {
+    manifest {
+        attributes(JMap.of(
+                "Premain-Class", "dev.csl.mixinloader.MixinLoader",
+                "Agent-Class", "dev.csl.mixinloader.MixinLoader",
+                "Can-Redefine-Classes", "true",
+                "Can-Retransform-Classes", "true"
+        ))
+    }
+}
+
+tasks.shadowJar {
+    mergeServiceFiles()
+    relocate("net.fabricmc.mappingio", "dev.csl.mixinloader.shadow.mappingio")
+}
+
+var targetJavaVersion = 17
+java {
+    var javaVersion = JavaVersion.toVersion(targetJavaVersion)
+    sourceCompatibility = javaVersion
+    targetCompatibility = javaVersion
+    if (JavaVersion.current() < javaVersion) {
+        toolchain.languageVersion = JavaLanguageVersion.of(targetJavaVersion)
+    }
+}
+
+tasks.withType(Class.forName("org.gradle.api.tasks.compile.JavaCompile") as Class<JavaCompile>).configureEach {
+    options.encoding = "UTF-8"
+    options.compilerArgs.addAll(JList.of(
+            "--add-exports=java.base/jdk.internal.loader=ALL-UNNAMED"
+    ))
+}
+
+tasks.processResources {
+    var props = JMap.of("version", version)
+    inputs.properties(props)
+    filteringCharset = "UTF-8"
+    filesMatching("paper-plugin.yml") {
+        expand(props)
+    }
+}
