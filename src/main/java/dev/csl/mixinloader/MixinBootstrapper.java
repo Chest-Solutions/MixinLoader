@@ -87,7 +87,7 @@ public final class MixinBootstrapper {
 		byte[] optval = new byte[4];
 		int[] optlen = new int[]{ 4 };
 
-		for (long h = 4; h < 65536; h += 4) {
+		for (long h = 4; h < 65536; h++) {
 			optlen[0] = 4;
 			int res = WinSock.INSTANCE.getsockopt(h, SOL_SOCKET, SO_ACCEPTCONN, optval, optlen);
 			if (res == 0 && (optval[0] != 0 || optval[1] != 0 || optval[2] != 0 || optval[3] != 0)) {

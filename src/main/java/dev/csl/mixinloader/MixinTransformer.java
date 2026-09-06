@@ -83,7 +83,6 @@ public class MixinTransformer implements ClassFileTransformer {
 				|| className.startsWith("org/objectweb/asm/")
 				|| className.startsWith("com/google/common/")
 				|| className.startsWith("com/google/gson/")
-				|| (className.startsWith("dev/csl/mixinloader/")
-				&& !className.equals("dev/csl/mixinloader/MixinLegacyBootstrapper"));
+				|| className.startsWith("dev/csl/mixinloader/");
 	}
 }

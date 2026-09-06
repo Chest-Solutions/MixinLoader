@@ -109,7 +109,7 @@ public class PaperMixinLogger implements ILogger {
 
 	@Override
 	public void warn(String message, Object... params) {
-		System.out.println("[WARN] [" + name + "] " + format(message, params));
+		System.err.println("[WARN] [" + name + "] " + format(message, params));
 	}
 
 	@Override
