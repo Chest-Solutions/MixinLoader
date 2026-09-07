@@ -1,5 +1,6 @@
 package dev.csl.mixinloader.service;
 
+import com.google.auto.service.AutoService;
 import org.jetbrains.annotations.NotNull;
 import org.spongepowered.asm.service.IGlobalPropertyService;
 import org.spongepowered.asm.service.IPropertyKey;
@@ -7,7 +8,8 @@ import org.spongepowered.asm.service.IPropertyKey;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
-
+@SuppressWarnings("unused")
+@AutoService(IGlobalPropertyService.class)
 public class PaperGlobalPropertyService implements IGlobalPropertyService {
 	private static final Map<String, Object> PROPERTIES = new ConcurrentHashMap<>();
 

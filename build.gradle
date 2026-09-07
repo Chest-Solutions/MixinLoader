@@ -1,7 +1,10 @@
 //file:noinspection VulnerableLibrariesLocal
 //file:noinspection GroovyAssignabilityCheck
+import dev.csl.mixinloader.build.AdviceMethodSplicer
+import org.gradle.internal.jvm.Jvm
 import java.util.List as JList
 import java.util.Map as JMap
+import java.util.jar.JarFile
 
 plugins {
     id("java")
@@ -10,19 +13,28 @@ plugins {
 }
 
 group = "dev.csl"
-version = "1.0.0"
+version = "1.1.0"
 
 repositories {
     mavenCentral()
+    google()
     maven {
-        name = "PaperMC"
-        url = uri("https://repo.papermc.io/repository/maven-public/")
+          name = "PaperMC"
+          url = uri("https://repo.papermc.io/repository/maven-public/")
+    }
+    maven {
+        name = "NeoForged"
+        url = uri("https://maven.neoforged.net/releases/")
+    }
+    maven {
+        name = "MinecraftLibraries"
+        url = uri("https://libraries.minecraft.net/")
     }
 }
 
 dependencies {
     compileOnly("io.papermc.paper:paper-api:1.19.3-R0.1-SNAPSHOT")
-    compileOnly("net.java.dev.jna:jna-platform:5.19.1")
+    implementation("net.java.dev.jna:jna-platform:5.19.1")
     compileOnly("io.papermc:paperclip:3.0.3")
 
     implementation("net.fabricmc:access-widener:2.1.0")
@@ -31,8 +43,10 @@ dependencies {
     implementation("io.github.llamalad7:mixinextras-common:0.5.4")
     annotationProcessor("io.github.llamalad7:mixinextras-common:0.5.4")
 
-    implementation("xyz.jpenilla:reflection-remapper:0.1.2")
+    compileOnly("com.google.auto.service:auto-service:1.1.1")
+    annotationProcessor("com.google.auto.service:auto-service:1.1.1")
 
+    implementation("xyz.jpenilla:reflection-remapper:0.1.2")
     implementation("net.bytebuddy:byte-buddy:1.18.13")
 }
 
@@ -58,10 +72,95 @@ tasks.jar {
     }
 }
 
+def patchedAdviceDir = layout.buildDirectory.dir("generated/patched-advice")
+
+def advicePatches = [
+	"dev/csl/mixinloader/MixinLoader.class": [
+		"register(Ljava/net/URLClassLoader;)V"
+	],
+	"dev/csl/mixinloader/MixinLoader\$LoadClassRouterAdvice.class": [
+		"onEnter(Ljava/lang/ClassLoader;Ljava/lang/String;Z)Ljava/lang/Class;",
+		"onExit(Ljava/lang/Class;Ljava/lang/Class;)V"
+	]
+]
+
 tasks.shadowJar {
-    mergeServiceFiles()
-    duplicatesStrategy = DuplicatesStrategy.INCLUDE
-    relocate("net.fabricmc.mappingio", "dev.csl.mixinloader.shadow.mappingio")
+	archiveClassifier.set("")
+
+	minimize()
+	mergeServiceFiles()
+	duplicatesStrategy = DuplicatesStrategy.INCLUDE
+	relocate("net.fabricmc.mappingio", "dev.csl.mixinloader.shadow.mappingio")
+	minimize {
+		r8 {
+			keepRuleFiles.from(rootProject.file("rules.pro"))
+			keepRuleFiles.from(
+				layout.projectDirectory.file("r8-rules.pro")
+			)
+			enableOptimization()
+		}
+	}
+
+	doLast {
+		File shadowArchive = archiveFile.get().asFile
+		File outputRoot = patchedAdviceDir.get().asFile
+		if (outputRoot.exists() && !outputRoot.deleteDir()) {
+			throw new GradleException("Could not clean ${outputRoot}")
+		}
+
+		// First create the two patched class files while the R8 JAR is open for
+		// reading. The manifest and every other JAR entry remain untouched.
+		new JarFile(shadowArchive).withCloseable { jar ->
+			advicePatches.each { String classEntry, List<String> methods ->
+				def r8Entry = jar.getJarEntry(classEntry)
+				if (r8Entry == null) {
+					throw new GradleException("R8 JAR is missing ${classEntry}")
+				}
+
+				File javacClass = sourceSets.main.output.classesDirs.files
+					.collect { new File(it, classEntry) }
+					.find { it.isFile() }
+				if (javacClass == null) {
+					throw new GradleException("javac output is missing ${classEntry}")
+				}
+
+				byte[] r8Bytes = jar.getInputStream(r8Entry).withCloseable { it.bytes }
+				byte[] patched = AdviceMethodSplicer.replaceMethods(
+					r8Bytes,
+					javacClass.bytes,
+					methods as String[]
+				)
+
+				File destination = new File(outputRoot, classEntry)
+				destination.parentFile.mkdirs()
+				destination.bytes = patched
+			}
+		}
+
+		// Use the jar tool from the JDK running Gradle to update only the two
+		// class entries. No manifest option is supplied, so ShadowJar's merged
+		// META-INF/MANIFEST.MF is preserved as-is.
+		File jarTool = Jvm.current().getExecutable("jar")
+		if (!jarTool.isFile()) {
+			throw new GradleException("Could not locate the JDK jar tool.")
+		}
+
+		List<String> command = [
+			jarTool.absolutePath,
+			"--update",
+			"--file",
+			shadowArchive.absolutePath
+		]
+		advicePatches.keySet().each { String classEntry ->
+			command.add("-C")
+			command.add(outputRoot.absolutePath)
+			command.add(classEntry)
+		}
+
+		providers.exec {
+			commandLine(command)
+		}.result.get().assertNormalExitValue()
+	}
 }
 
 var targetJavaVersion = 17

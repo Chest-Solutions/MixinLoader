@@ -68,7 +68,8 @@ public class MixinTransformer implements ClassFileTransformer {
 			}
 			return modified ? bytes : null;
 		} catch (Throwable t) {
-			System.err.println("[MixinLoader] Transform error: " + t);
+			System.err.println("[MixinLoader] Transform error:");
+			t.printStackTrace(System.err);
 			return modified ? bytes : null;
 		}
 	}

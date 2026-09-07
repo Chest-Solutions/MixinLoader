@@ -1,7 +1,9 @@
 package dev.csl.mixinloader.service;
 
+import com.google.auto.service.AutoService;
 import org.spongepowered.asm.service.IMixinServiceBootstrap;
-
+@SuppressWarnings("unused")
+@AutoService(IMixinServiceBootstrap.class)
 public class PaperMixinServiceBootstrap implements IMixinServiceBootstrap {
 
 	@Override

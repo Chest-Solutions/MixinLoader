@@ -1,5 +1,6 @@
 package dev.csl.mixinloader.service;
 
+import com.google.auto.service.AutoService;
 import dev.csl.mixinloader.MixinBootstrapper;
 import dev.csl.mixinloader.MixinLoader;
 import dev.csl.mixinloader.MixinTransformer;
@@ -23,7 +24,7 @@ import java.util.Collection;
 import java.util.Collections;
 
 import static dev.csl.mixinloader.Proxies.PAPERCLIP_CLASS;
-
+@AutoService(IMixinService.class)
 public class PaperMixinService implements IMixinService, IClassProvider, IClassBytecodeProvider {
 	public static final URLClassLoader minecraftClassLoader;
 	public static final URLClassLoader extraClassLoader = new URLClassLoader(new URL[0], ClassLoader.getSystemClassLoader());
@@ -166,12 +167,21 @@ public class PaperMixinService implements IMixinService, IClassProvider, IClassB
 
 	@Override
 	public MixinEnvironment.CompatibilityLevel getMinCompatibilityLevel() {
-		return MixinEnvironment.CompatibilityLevel.DEFAULT;
+		int classVersion = Integer.parseInt(System.getProperty("java.class.version").split("\\.")[0]);
+		MixinEnvironment.CompatibilityLevel level = MixinEnvironment.CompatibilityLevel.forClassVersion(classVersion);
+
+		// Fallback to the current environment level or highest available if null
+		return level != null ? level : getMaxCompatibilityLevel();
 	}
 
 	@Override
 	public MixinEnvironment.CompatibilityLevel getMaxCompatibilityLevel() {
-		return MixinEnvironment.CompatibilityLevel.JAVA_21;
+		int classVersion = Integer.parseInt(System.getProperty("java.class.version").split("\\.")[0]);
+		MixinEnvironment.CompatibilityLevel level = MixinEnvironment.CompatibilityLevel.forClassVersion(classVersion);
+		MixinEnvironment.CompatibilityLevel maxLevel = MixinEnvironment.CompatibilityLevel.getMaxEffective();
+
+		if (level == null || level.canSupport(maxLevel)) return maxLevel;
+		return level;
 	}
 
 	@Override

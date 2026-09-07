@@ -3,7 +3,6 @@ package dev.csl.mixinloader;
 import com.sun.jna.*;
 import com.sun.jna.platform.mac.SystemB;
 import dev.csl.mixinloader.util.SneakyExceptions;
-import org.apache.commons.lang3.SystemUtils;
 import org.jetbrains.annotations.NotNull;
 
 import java.io.IOException;
@@ -16,8 +15,10 @@ import java.util.Optional;
 public final class MixinBootstrapper {
 	public record LaunchArguments(List<String> jvmArgs, List<String> programArgs, Path jar){}
 
-	private static final int PROC_FD_INFO_SIZE = new SystemB.ProcFdInfo().size();
-	private static final int SOCKET_INFO_SIZE = new SystemB.SocketInfo().size();
+	public static class MacFields {
+		private static final int PROC_FD_INFO_SIZE = new SystemB.ProcFdInfo().size();
+		private static final int SOCKET_INFO_SIZE = new SystemB.SocketInfo().size();
+	}
 
 	@SuppressWarnings("UnusedReturnValue")
     public interface LibC extends Library {
@@ -33,14 +34,15 @@ public final class MixinBootstrapper {
 		int closesocket(long s);
 	}
 
+	@SuppressWarnings("unused")
 	public static void checkBootAndLoadMixinLoader() {
 		if (Boolean.getBoolean("mixinloader.loaded")) return;
 
-		if (SystemUtils.IS_OS_WINDOWS) {
+		if (Platform.isWindows()) {
 			closeAllWindowsListeningSockets();
-		} else if (SystemUtils.IS_OS_MAC) {
+		} else if (Platform.isMac()) {
 			closeAllMacListeningSockets();
-		} else if (SystemUtils.IS_OS_LINUX) {
+		} else if (Platform.isLinux()) {
 			closeAllLinuxListeningSockets();
 		}
 
@@ -82,7 +84,7 @@ public final class MixinBootstrapper {
 		int bufSize = sysB.proc_pidinfo(pid, SystemB.PROC_PIDLISTFDS, 0, null, 0);
 		if (bufSize <= 0) return;
 
-		int count = bufSize / PROC_FD_INFO_SIZE;
+		int count = bufSize / MacFields.PROC_FD_INFO_SIZE;
 		SystemB.ProcFdInfo[] fdArray = (SystemB.ProcFdInfo[]) new SystemB.ProcFdInfo().toArray(count);
 
 		int r = sysB.proc_pidinfo(pid, SystemB.PROC_PIDLISTFDS, 0, fdArray[0], bufSize);
@@ -97,7 +99,7 @@ public final class MixinBootstrapper {
 				continue;
 
 			r = sysB.proc_pidfdinfo(pid, fdArray[i].proc_fd,
-				SystemB.PROC_PIDFDSOCKETINFO, sockInfo, SOCKET_INFO_SIZE);
+				SystemB.PROC_PIDFDSOCKETINFO, sockInfo, MacFields.SOCKET_INFO_SIZE);
 			if (r <= 0) continue;
 
 			if (sockInfo.soi_kind != SystemB.SOCKINFO_TCP) continue;
