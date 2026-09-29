@@ -1,9 +1,9 @@
 package dev.csl.mixinloader.util;
 
-import jdk.internal.loader.URLClassPath;
-
 import java.lang.reflect.Field;
 import java.net.URL;
+
+import jdk.internal.loader.URLClassPath;
 
 public class ClassLoaderUtils {
     public static URLClassPath getURLClassPath(ClassLoader classLoader) {

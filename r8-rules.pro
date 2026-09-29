@@ -326,6 +326,7 @@
 -dontwarn org.jetbrains.java.decompiler.**
 -dontwarn net.minecraft.launchwrapper.**
 -dontwarn org.jetbrains.annotations.**
+-dontwarn java.util.NamespaceRegistry
 -dontwarn org.apache.logging.log4j.**
 -dontwarn com.google.auto.service.**
 -dontwarn org.checkerframework.**

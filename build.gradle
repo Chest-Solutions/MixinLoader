@@ -48,16 +48,19 @@ dependencies {
 
     implementation("xyz.jpenilla:reflection-remapper:0.1.2")
     implementation("net.bytebuddy:byte-buddy:1.18.13")
+
+	implementation("org.yaml:snakeyaml:2.2")
+	implementation("com.google.code.gson:gson:2.14.0")
 }
 
 tasks {
     runServer {
         javaLauncher.set(project.javaToolchains.launcherFor {
-            languageVersion = JavaLanguageVersion.of(17)
+            languageVersion = JavaLanguageVersion.of(25)
         })
 
 
-        minecraftVersion("1.19.3")
+        minecraftVersion("26.2")
     }
 }
 
@@ -77,10 +80,6 @@ def patchedAdviceDir = layout.buildDirectory.dir("generated/patched-advice")
 def advicePatches = [
 	"dev/csl/mixinloader/MixinLoader.class": [
 		"register(Ljava/net/URLClassLoader;)V"
-	],
-	"dev/csl/mixinloader/MixinLoader\$LoadClassRouterAdvice.class": [
-		"onEnter(Ljava/lang/ClassLoader;Ljava/lang/String;Z)Ljava/lang/Class;",
-		"onExit(Ljava/lang/Class;Ljava/lang/Class;)V"
 	]
 ]
 
@@ -91,9 +90,10 @@ tasks.shadowJar {
 	mergeServiceFiles()
 	duplicatesStrategy = DuplicatesStrategy.INCLUDE
 	relocate("net.fabricmc.mappingio", "dev.csl.mixinloader.shadow.mappingio")
+	relocate("com.google.gson", "dev.csl.mixinloader.shadow.gson")
+	relocate("org.yaml.snakeyaml", "dev.csl.mixinloader.shadow.snakeyaml")
 	minimize {
 		r8 {
-			keepRuleFiles.from(rootProject.file("rules.pro"))
 			keepRuleFiles.from(
 				layout.projectDirectory.file("r8-rules.pro")
 			)
@@ -108,8 +108,6 @@ tasks.shadowJar {
 			throw new GradleException("Could not clean ${outputRoot}")
 		}
 
-		// First create the two patched class files while the R8 JAR is open for
-		// reading. The manifest and every other JAR entry remain untouched.
 		new JarFile(shadowArchive).withCloseable { jar ->
 			advicePatches.each { String classEntry, List<String> methods ->
 				def r8Entry = jar.getJarEntry(classEntry)
@@ -117,12 +115,8 @@ tasks.shadowJar {
 					throw new GradleException("R8 JAR is missing ${classEntry}")
 				}
 
-				File javacClass = sourceSets.main.output.classesDirs.files
-					.collect { new File(it, classEntry) }
-					.find { it.isFile() }
-				if (javacClass == null) {
-					throw new GradleException("javac output is missing ${classEntry}")
-				}
+				File javacClass = sourceSets.main.output.classesDirs.files.collect { new File(it, classEntry) }.find { it.isFile() }
+				if (javacClass == null) throw new GradleException("javac output is missing ${classEntry}")
 
 				byte[] r8Bytes = jar.getInputStream(r8Entry).withCloseable { it.bytes }
 				byte[] patched = AdviceMethodSplicer.replaceMethods(
@@ -137,13 +131,8 @@ tasks.shadowJar {
 			}
 		}
 
-		// Use the jar tool from the JDK running Gradle to update only the two
-		// class entries. No manifest option is supplied, so ShadowJar's merged
-		// META-INF/MANIFEST.MF is preserved as-is.
 		File jarTool = Jvm.current().getExecutable("jar")
-		if (!jarTool.isFile()) {
-			throw new GradleException("Could not locate the JDK jar tool.")
-		}
+		if (!jarTool.isFile()) throw new GradleException("Could not locate the JDK jar tool.")
 
 		List<String> command = [
 			jarTool.absolutePath,
@@ -157,10 +146,18 @@ tasks.shadowJar {
 			command.add(classEntry)
 		}
 
-		providers.exec {
-			commandLine(command)
-		}.result.get().assertNormalExitValue()
+		providers.exec { commandLine(command) }.result.get().assertNormalExitValue()
 	}
+}
+
+sourceSets {
+    registryStub {
+        java.srcDir("src/registryStub/java")
+    }
+}
+
+tasks.compileRegistryStubJava {
+    options.compilerArgs.add("--patch-module=java.base=${sourceSets.registryStub.java.sourceDirectories.singleFile.absolutePath}")
 }
 
 var targetJavaVersion = 17
@@ -168,16 +165,16 @@ java {
     var javaVersion = JavaVersion.toVersion(targetJavaVersion)
     sourceCompatibility = javaVersion
     targetCompatibility = javaVersion
-    if (JavaVersion.current() < javaVersion) {
-        toolchain.languageVersion = JavaLanguageVersion.of(targetJavaVersion)
-    }
+    if (JavaVersion.current() < javaVersion) toolchain.languageVersion = JavaLanguageVersion.of(targetJavaVersion)
 }
 
 tasks.withType(Class.forName("org.gradle.api.tasks.compile.JavaCompile") as Class<JavaCompile>).configureEach {
     options.encoding = "UTF-8"
-    options.compilerArgs.addAll(JList.of(
-            "--add-exports=java.base/jdk.internal.loader=ALL-UNNAMED"
-    ))
+    options.compilerArgs.add("--add-exports=java.base/jdk.internal.loader=ALL-UNNAMED")
+}
+
+tasks.compileJava {
+	options.compilerArgs.add("--patch-module=java.base=${sourceSets.registryStub.output.classesDirs.singleFile.absolutePath}")
 }
 
 tasks.processResources {
@@ -187,4 +184,8 @@ tasks.processResources {
     filesMatching(JList.of("paper-plugin.yml", "plugin.yml")) {
         expand(props)
     }
+    from(tasks.compileRegistryStubJava) {
+		include("java/util/NamespaceRegistry.class")
+		into("META-INF/mixinloader")
+	}
 }
