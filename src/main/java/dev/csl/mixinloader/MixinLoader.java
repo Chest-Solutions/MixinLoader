@@ -4,6 +4,8 @@ import static dev.csl.mixinloader.Proxies.MIXIN_ENVIRONMENT;
 import static net.bytebuddy.matcher.ElementMatchers.is;
 import static net.bytebuddy.matcher.ElementMatchers.isConstructor;
 import static net.bytebuddy.matcher.ElementMatchers.isSubTypeOf;
+import static net.bytebuddy.matcher.ElementMatchers.nameContains;
+import static net.bytebuddy.matcher.ElementMatchers.nameEndsWith;
 import static net.bytebuddy.matcher.ElementMatchers.nameMatches;
 import static net.bytebuddy.matcher.ElementMatchers.named;
 import static net.bytebuddy.matcher.ElementMatchers.none;
@@ -223,7 +225,7 @@ public class MixinLoader {
 			.disableClassFormatChanges()
 			.with(AgentBuilder.RedefinitionStrategy.RETRANSFORMATION)
 			.ignore(none())
-			.type(is(ClassLoader.class).or(isSubTypeOf(ClassLoader.class)))
+			.type(nameEndsWith("ClassLoader"))
 			.transform((builder, type, loader, module, pd) -> builder.visit(new FindClassMissVisitor()))
 			.with(AgentBuilder.Listener.StreamWriting.toSystemError().withErrorsOnly())
 			.installOn(inst);
