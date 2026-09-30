@@ -1,84 +1,111 @@
-# 🧩 MixinLoader
+# MixinLoader
 
-A robust, drop-in Java plugin designed to bootstrap [SpongePowered Mixin](https://github.com/SpongePowered/Mixin), [MixinExtras](https://github.com/LlamaLad7/MixinExtras), and **Access Wideners** into modern **PaperMC** server environments.
+MixinLoader starts [SpongePowered Mixin](https://github.com/SpongePowered/Mixin), [MixinExtras](https://github.com/LlamaLad7/MixinExtras), and Access Wideners on a PaperMC server. It installs like a normal plugin. You do not edit your start script.
 
-## 📖 Overview
+## Overview
 
-Modern PaperMC servers utilize a highly isolated, multi-layered classloader architecture. Between `Paperclip`'s custom classloading, legacy Bukkit `PluginClassLoader`s, and modern `PaperPluginClassLoader`s, getting a custom Mixin loader to successfully see, target, and inject into server and plugin classes is notoriously difficult.
+A Paper server loads classes through several classloaders. Paperclip loads the server code, and each plugin runs in its own classloader. Because of that split, a Mixin in one plugin cannot see server classes or other plugin classes.
 
-**MixinLoader** solves this by acting as a self-bootstrapping plugin. It installs like a normal plugin, but automatically injects itself into the JVM arguments, hijacks the server's root classloader, bridges the isolation gaps between the server and plugin environments, and initializes the Mixin ecosystem before the server fully boots.
+MixinLoader removes that barrier. It adds itself to the JVM as a Java agent. It records the package of every plugin with its owning classloader. Failed class lookups go to the loader that owns the class. The Mixin system then starts before the server completes startup.
 
-## ✨ Features
+## Features
 
-- 🪄 **Drop-In Installation:** Install it like a normal plugin. No need to edit `start.sh` or `start.bat`. MixinLoader automatically detects if it's running as an agent, and if not, gracefully closes network sockets and relaunches the JVM with itself injected as a `-javaagent`.
-- 🤝 **Broad Ecosystem Compatibility:** Natively supports loading and running Mixin plugins built for **Ignite**, **Horizon**, and **Origami**.
-- 🚀 **Paperclip Hijacking:** Intercepts `Paperclip`'s initialization to replace the root `URLClassLoader` with a custom `RoutingServerClassLoader`, giving the loader full visibility of the server environment.
-- 🔀 **Smart Class Routing:** Automatically maps plugin packages to their respective classloaders. If a Mixin targets a class in a plugin, the loader knows exactly which `PluginClassLoader` to ask.
-- 📖 **Access Widener Support:** Fully supports Access Wideners out of the box, allowing your mixins and plugins to bypass Java visibility restrictions seamlessly.
-- 🔄 **Universal Plugin Support:** Fully compatible with both legacy (`org.bukkit.plugin.java.PluginClassLoader`) and modern (`io.papermc.paper.plugin...PaperPluginClassLoader`) plugin loading systems.
-- 🧰 **MixinExtras Included:** Bootstraps [MixinExtras](https://github.com/LlamaLad7/MixinExtras) automatically for advanced Mixin capabilities.
-- 🛡️ **Java 17+ Ready:** Automatically opens required `java.base` internals via `Instrumentation.redefineModule` to ensure deep reflection works on modern JVMs.
+- **No startup changes.** The plugin relaunches the JVM with itself as a `-javaagent`. You do not touch `start.sh` or `start.bat`.
+- **Loads plugins from other Mixin loaders.** Mixin plugins built for Ignite, Horizon, and Origami work. See Supported and unsupported.
+- **Works with both plugin systems.** The loader instruments the legacy `org.bukkit.plugin.java.PluginClassLoader` and the modern `io.papermc.paper.plugin.provider.classloader.PaperPluginClassLoader`.
+- **Access Wideners.** A plugin can ship widener files in its JAR, and the loader applies them without extra setup.
+- **MixinExtras included.** The loader starts MixinExtras automatically, so advanced Mixin features work.
+- **No extra JVM flags.** The agent opens the needed `java.base` packages at runtime with `Instrumentation.redefineModule`.
 
-## ⚠️ Compatibility & API Limitations
+## Requirements
 
-While MixinLoader can successfully load and execute plugins designed for **Ignite**, **Horizon**, and **Origami**, it is important to understand how this compatibility works:
+- A PaperMC server. MixinLoader ships a `plugin.yml` (Bukkit path, API 1.13) and a `paper-plugin.yml` (Paper path, API 1.19).
+- Java 17 or later.
+- Linux, Windows, or macOS.
 
-* **What IS supported:** Core Mixin injection, MixinExtras extensions, Access Wideners, and standard classloader routing. If a plugin relies purely on these standard tools, it will work perfectly.
-* **What IS NOT supported:** MixinLoader **does not** implement the proprietary public or private Java APIs provided by Ignite, Horizon, or Origami. We focus strictly on the core Mixin ecosystem. If a plugin strictly depends on custom utility classes, proprietary lifecycle events, or specific API methods unique to those other loaders, it will fail to load or function correctly.
+## Install
 
-## 📦 Usage
+1. Download the newest `MixinLoader-<version>.jar` from the Releases page.
+2. Copy the JAR into the `plugins/` folder of your server.
+3. Start the server with your usual command:
 
-Installing MixinLoader is as simple as installing any other Paper plugin. **No modifications to your startup scripts are required.**
+    ```bash
+    java -jar server.jar
+    ```
 
-1. **Download** the latest `MixinLoader-1.0.0-all.jar`.
-2. **Drop it** into your server's `plugins/` folder.
-3. **Start your server** exactly as you normally would:
-   ```bash
-   java -jar server.jar
-   ```
+The server restarts once during startup. This is normal. The plugin sees that the JVM has no agent attached. It closes the listening sockets of the server, relaunches the JVM with `-javaagent`, and exits.
 
-Upon startup, the plugin will detect that it is not running as a Java agent. It will cleanly close the server's listening sockets to prevent port-binding conflicts, and seamlessly relaunch the JVM with itself injected as a `-javaagent` before the server fully loads.
+The close step matters. If the old JVM kept the port, the new JVM would fail with `java.net.BindException: Address already in use`.
 
-## 🛠️ How It Works (Technical Overview)
-
-### 1. The Self-Bootstrapper (`MixinBootstrapper`)
-When the server starts, MixinLoader checks the `mixinloader.loaded` system property. If it's missing, it knows it needs to inject itself:
-* **On Linux/POSIX:** It reads `/proc/self/fd` to find open network sockets and closes them via native `libc` calls. It then uses `execvp` to replace the current process with the new JVM command, ensuring no orphaned processes are left behind.
-* **On Windows:** It iterates through process handles, checking for listening sockets via `WinSock2` (`getsockopt` with `SO_ACCEPTCONN`), closes them, and uses a `ProcessBuilder` to launch the new JVM.
-* *Why close sockets?* If the JVM restarts without closing the sockets first, the OS keeps the port (e.g., 25565) in a `TIME_WAIT` state, causing the newly launched JVM to crash with `java.net.BindException: Address already in use`.
-
-### 2. Bytecode Instrumentation (`MixinLoader`)
-Once running as an agent, it uses **ByteBuddy** to perform runtime bytecode manipulation:
-* **Root Classloader Replacement:** Uses `MemberSubstitution` to intercept the `new URLClassLoader(...)` call inside `Paperclip.main` and replaces it with `RoutingServerClassLoader`.
-* **Namespace Registry:** Scans plugin JARs to build a concurrent map of package names to classloaders.
-* **LoadClass Interception:** Injects `Advice` into the `loadClass` methods of the server and plugin classloaders to route missing classes to the correct plugin classloader.
-
-## 🏗️ Building from Source
-
-This project uses Gradle for dependency management.
+To skip the restart, attach the agent yourself:
 
 ```bash
-# Clone the repository
+java -javaagent:plugins/MixinLoader-<version>.jar -jar server.jar
+```
+
+The agent sets `mixinloader.loaded=true` before the plugin loads. The plugin checks that property and skips the relaunch.
+
+## Plugin formats
+
+The loader scans every JAR in `plugins/` and reads the Mixin config of each plugin:
+
+| Plugin made for | Mixin configs | Access wideners |
+| --- | --- | --- |
+| Paper or Bukkit | `mixins` list in `paper-plugin.yml` or `plugin.yml` | entries in the mixin JSON files |
+| Ignite | `mixins` array in `ignite.mod.json` | `wideners` array in `ignite.mod.json` |
+| Horizon | `mixins` array in `horizon.plugin.json` | `wideners` array in `horizon.plugin.json` |
+| Origami | every `*.mixins.json` file | every `*.aw`, `*.accesswidener`, or `*.at` file |
+
+## Supported and unsupported
+
+MixinLoader supports Mixin injection, MixinExtras extensions, Access Wideners, and class routing. A plugin that uses only these tools works.
+
+MixinLoader does not implement the public or private APIs of Ignite, Horizon, or Origami. It does not supply their custom utility classes, lifecycle events, or API methods. A plugin that calls those APIs fails to load.
+
+## How it works
+
+### Bootstrap
+
+`plugin.yml` and `paper-plugin.yml` point to `MixinLegacyBootstrapper` and `MixinModernBootstrapper`. Both call `MixinBootstrapperIsolator`. The isolator loads `MixinBootstrapper` in a small child `URLClassLoader` with no parent. The plugin classloader state stays out of the bootstrap.
+
+`MixinBootstrapper.checkBootAndLoadMixinLoader` then reads the `mixinloader.loaded` property. If the property is missing, it closes the listening sockets. It relaunches the JVM with `-javaagent` set to the plugin JAR. Each OS closes sockets in its own way:
+
+- **Linux.** The bootstrapper reads `/proc/self/fd` and closes each open socket through native `libc` calls. It then calls `execvp`, which replaces the running process, so no orphan stays behind.
+- **Windows.** The bootstrapper scans the process handles with `WinSock2` and tests each one with `getsockopt` and `SO_ACCEPTCONN`. It closes the listening sockets, then starts the new JVM with `ProcessBuilder`.
+- **macOS.** The bootstrapper lists file descriptors and socket info with `SystemB` and `proc_pidinfo`. It closes the listening sockets, then starts the new JVM with `ProcessBuilder`.
+
+### Agent
+
+`MixinLoader.premain` runs in the relaunched JVM:
+
+1. It opens `jdk.internal.loader`, `java.net`, `java.lang`, and `java.util` from `java.base` to the agent module. It uses `Instrumentation.redefineModule` for this.
+2. It defines `java.util.NamespaceRegistry` inside `java.base`. The build compiles that class against a patched `java.base`, and the JAR ships it at `META-INF/mixinloader/java/util/NamespaceRegistry.class`. Because the class lives in `java.base`, every classloader can call it without reflection.
+3. ByteBuddy adds a call to `MixinLoader.register` at the end of each plugin loader constructor. `register` scans the JAR URLs of the loader. It records each package with its owning classloader in the registry.
+4. ByteBuddy rewrites `findClass` in every classloader. When a loader cannot find a class, injected code asks the registry for it instead of throwing. A Mixin that targets a class of another plugin now resolves.
+5. The agent starts the Mixin system: `MixinBootstrap.init()`, the `MixinTransformer` class file transformer, MixinExtras, the plugin scan, then the `INIT` and `DEFAULT` phases.
+
+## Build from source
+
+```bash
 git clone https://github.com/Chest-Solutions/MixinLoader.git
 cd MixinLoader
-
-# Build the project
 ./gradlew build
 ```
 
-The compiled JAR will be located in the `build/libs/` directory.
+Use JDK 17 or later. The shadow JAR lands in `build/libs/`. After R8 minimizes the JAR, one build step replaces the `register` method with the compiler output. R8 rewrites Advice methods during minimization, and the patch restores the correct code.
 
-## 📚 Dependencies & Credits
+## Credits
 
-Massive thanks to the creators of the following libraries:
+The project bundles or uses:
 
-- **[SpongePowered Mixin](https://github.com/SpongePowered/Mixin)** - The core mixin framework.
-- **[MixinExtras](https://github.com/LlamaLad7/MixinExtras)** by LlamaLad7 - Essential Mixin extensions.
-- **[ByteBuddy](https://bytebuddy.net/)** - For powerful runtime bytecode generation.
-- **[reflectionremapper](https://github.com/jpenilla/reflectionremapper)** by jpenilla - For clean, type-safe reflection proxies.
-- **[JNA (Java Native Access)](https://github.com/java-native-access/jna)** - For OS-level socket and process management.
-- **[PaperMC](https://papermc.io/)** - For the amazing server software.
+- [SpongePowered Mixin](https://github.com/SpongePowered/Mixin): the Mixin framework.
+- [MixinExtras](https://github.com/LlamaLad7/MixinExtras) by LlamaLad7: Mixin extensions.
+- [ByteBuddy](https://bytebuddy.net/): runtime bytecode instrumentation.
+- [reflection-remapper](https://github.com/jpenilla/reflectionremapper) by jpenilla: reflection proxies.
+- [JNA](https://github.com/java-native-access/jna): OS-level socket and process calls.
+- [Access Widener](https://github.com/FabricMC/access-widener): the widener file format.
+- [PaperMC](https://papermc.io/): the server software and Paperclip.
 
-## ⚖️ License
+## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+MIT. See [LICENSE](LICENSE).
