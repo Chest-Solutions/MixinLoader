@@ -7,6 +7,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
+import it.unimi.dsi.fastutil.ints.IntArrayList;
 import org.jetbrains.annotations.NotNull;
 
 import com.sun.jna.Library;
@@ -43,16 +44,16 @@ public final class MixinBootstrapper {
 	public static void checkBootAndLoadMixinLoader() {
 		if (Boolean.getBoolean("mixinloader.loaded")) return;
 
+		final List<String> command = getCommand();
 		if (Platform.isWindows()) {
 			closeAllWindowsListeningSockets();
 		} else if (Platform.isMac()) {
 			closeAllMacListeningSockets();
 		} else if (Platform.isLinux()) {
-			closeAllLinuxListeningSockets();
+			closeAllLinuxListeningSockets(command);
 		}
 
-		final ProcessBuilder pb = getProcessBuilder();
-
+		final ProcessBuilder pb = getProcessBuilder(command);
 		try {
 			final Process process = pb.start();
 			Runtime.getRuntime().addShutdownHook(new Thread(process::destroy));
@@ -78,9 +79,9 @@ public final class MixinBootstrapper {
 					prog.add(arg);
 				} else if (arg.equals("-jar")) {
 					nextJar = true;
-                } else if (arg.endsWith(".jar") && !arg.startsWith("-") && nextJar) {
-					pastJar = true;
+				} else if (nextJar) {
 					nextJar = false;
+					pastJar = true;
 					jar = Path.of(arg).toAbsolutePath();
 				} else {
 					jvm.add(arg);
@@ -143,10 +144,11 @@ public final class MixinBootstrapper {
 		}
 	}
 
-	private static void closeAllLinuxListeningSockets() {
+	private static void closeAllLinuxListeningSockets(List<String> command) {
 		final Path fdPath = Path.of("/proc/self/fd");
 		if (!Files.exists(fdPath)) return;
 
+		final IntArrayList fdsToClose = new IntArrayList();
 		try (var stream = Files.list(fdPath)) {
 			stream.forEach(path -> {
 				try {
@@ -155,27 +157,36 @@ public final class MixinBootstrapper {
 
 					final String target = Files.readSymbolicLink(path).toString();
 					if (target.startsWith("socket:")) {
-						LibC.INSTANCE.close(fd);
-						System.out.println("[MixinLoader] Safely closed socket FD: " + fd + " (" + target + ")");
+						fdsToClose.add(fd);
 					}
 				} catch (final Throwable ignored) {}
 			});
 		} catch (final Throwable ignored) {}
 
-		LibC.INSTANCE.execvp(getJavaExecutable(), new StringArray(getCommand().toArray(new String[0])));
-		System.err.println("execv failed with result, errno=" + Native.getLastError());
+		for (int i = 0; i < fdsToClose.size(); i++) {
+			int fd = fdsToClose.getInt(i);
+
+			LibC.INSTANCE.close(fd);
+			System.out.println("[MixinLoader] Safely closed socket FD: " + fd);
+		}
+
+		LibC.INSTANCE.execvp(getJavaExecutable(), new StringArray(command.toArray(new String[0])));
+		System.err.println("execvp failed, using fallback, errno=" + Native.getLastError());
 	}
 
-	private static @NotNull ProcessBuilder getProcessBuilder() {
-		return new ProcessBuilder(getCommand()).directory(Path.of(".").toAbsolutePath().toFile()).inheritIO();
+	private static @NotNull ProcessBuilder getProcessBuilder(List<String> command) {
+		return new ProcessBuilder(command).directory(Path.of(".").toAbsolutePath().toFile()).inheritIO();
 	}
 
-	@SuppressWarnings("DataFlowIssue")
-    private static @NotNull List<String> getCommand() {
+	private static @NotNull List<String> getCommand() {
 		final Path pluginJar = SneakyExceptions.get(() ->
 				Path.of(MixinBootstrapper.class.getProtectionDomain().getCodeSource().getLocation().toURI()));
 
 		final LaunchArguments launchArguments = getArgs();
+
+		if (launchArguments.jar == null) throw new NullPointerException("No jar argument found");
+		else if (pluginJar == null) throw new NullPointerException("Unable to detect MixinLoader jar location");
+
 		final List<String> command = new ArrayList<>();
 		command.add(getJavaExecutable());
 

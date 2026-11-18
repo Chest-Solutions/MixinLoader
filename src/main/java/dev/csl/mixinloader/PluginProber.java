@@ -1,18 +1,19 @@
 package dev.csl.mixinloader;
 
 import java.io.BufferedReader;
-import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.jar.JarFile;
+import java.util.stream.Stream;
 import java.util.zip.ZipEntry;
 
+import dev.csl.mixinloader.util.SneakyExceptions;
 import org.jetbrains.annotations.NotNull;
 import org.spongepowered.asm.mixin.Mixins;
 import org.yaml.snakeyaml.Yaml;
@@ -33,72 +34,93 @@ public class PluginProber {
 	private static final Yaml yaml = new Yaml();
 
 	public static void probePluginsAndAddConfigs() {
-		for (final File pluginFile : getPluginPaths()) {
-			if (!pluginFile.exists() || !pluginFile.isFile() || pluginFile.length() == 0) {
+		for (final Path pluginFile : getPluginPaths()) {
+			//noinspection DataFlowIssue
+			if (!Files.exists(pluginFile) || !Files.isRegularFile(pluginFile) || SneakyExceptions.get(() -> Files.size(pluginFile) == 0)) {
 				continue;
 			}
 
-			try (JarFile jar = new JarFile(pluginFile)) {
-				probeJar(jar);
-			} catch (final IOException e) {
-				System.err.println("[MixinLoader] Skipping unreadable jar: " + pluginFile.getName() + " (" + e.getMessage() + ")");
-			}
+			probeJar(pluginFile);
 		}
 	}
 
-	private static List<File> getPluginPaths() {
-		final List<File> paths = new ArrayList<>();
+	private static List<Path> getPluginPaths() {
+		final String[] args = ProcessHandle.current().info().arguments().orElse(new String[0]);
+		final Set<Path> paths = new LinkedHashSet<>();   // dedupe across overlapping flags
 
-		final String[] args = ProcessHandle.current().info().arguments()
-				.orElse(new String[0]);
+		// additive single-jar flags (both generations, both dashes)
+		for (final String p : flagValues(args, "--add-plugin", "-add-plugin", "--add-extra-plugin-jar")) {
+			paths.add(Path.of(p));
+		}
+		// additive directory flags
+		for (final String d : flagValues(args, "--add-plugin-dir", "-add-plugin-dir", "--add-extra-plugin-dir")) {
+			collectJarsFromDirectory(Path.of(d), paths);
+		}
 
+		// plugin root: -P / --plugins REPLACES the default plugins/ scan (verified live:
+		// with -P customplugins, Paper ignored plugins/ entirely)
+		final List<String> roots = flagValues(args, "-P", "--plugins");
+		collectJarsFromDirectory(Path.of(roots.isEmpty() ? "plugins" : roots.get(0)).toAbsolutePath(), paths);
+
+		return new ArrayList<>(paths);
+	}
+
+	/**
+	 * Collects every value passed to any of {@code flags}, accepting all forms:
+	 * {@code --flag=value}, {@code flag value}, and (for short flags like {@code -P})
+	 * {@code flagValue}. Repeated flags accumulate. Handles flag prefix collisions
+	 * (e.g. {@code --add-plugin-dir} must not match under {@code --add-plugin}).
+	 */
+	private static List<String> flagValues(final String[] args, final String... flags) {
+		final List<String> values = new ArrayList<>();
 		for (int i = 0; i < args.length; i++) {
-			final String arg = args[i];
-
-			if (arg.startsWith("--add-plugin=") || arg.startsWith("-add-plugin=")) {
-				paths.add(new File(arg.substring(arg.indexOf('=') + 1)));
-			} else if (arg.equals("--add-plugin") || arg.equals("-add-plugin")) {
-				if (i + 1 < args.length) {
-					paths.add(new File(args[++i]));
+			for (final String flag : flags) {
+				if (!args[i].startsWith(flag)) continue;
+				final String rest = args[i].substring(flag.length());
+				if (rest.isEmpty()) {                                  // exact match → space form
+					if (i + 1 < args.length) values.add(args[++i]);
+				} else if (rest.charAt(0) == '=') {                    // = form
+					values.add(rest.substring(1));
+				} else if (flag.length() == 2 && !flag.startsWith("--")) { // -Pdir attached form
+					values.add(rest);
 				}
-			} else if (arg.startsWith("--add-plugin-dir=") || arg.startsWith("-add-plugin-dir=")) {
-				collectJarsFromDirectory(new File(arg.substring(arg.indexOf('=') + 1)), paths);
-			} else if (arg.equals("--add-plugin-dir") || arg.equals("-add-plugin-dir")) {
-				if (i + 1 < args.length) {
-					collectJarsFromDirectory(new File(args[++i]), paths);
-				}
+				// otherwise: longer flag sharing this prefix (e.g. --add-plugin-dir under
+				// --add-plugin) — fall through, the real flag matches it on its own turn
 			}
 		}
-
-		collectJarsFromDirectory(Path.of("plugins").toAbsolutePath().toFile(), paths);
-		return paths;
+		return values;
 	}
 
-	private static void collectJarsFromDirectory(final File dir, final List<File> jarFiles) {
-		if (!dir.exists() || !dir.isDirectory()) return;
+	private static void collectJarsFromDirectory(final Path dir, final Set<Path> jarFiles) {
+		if (!Files.exists(dir) || !Files.isDirectory(dir) || !Files.isReadable(dir)) return;
 
-		final File[] files = dir.listFiles((d, name) -> name.endsWith(".jar"));
-		if (files != null) {
-			Collections.addAll(jarFiles, files);
+		Path[] paths = null;
+		try (Stream<Path> stream = Files.list(dir)) {
+			paths = stream
+				.filter(p -> p.toString().endsWith(".jar"))
+				.toArray(Path[]::new);
+		} catch (IOException ignored) {}
+		if (paths != null && paths.length != 0) {
+			Collections.addAll(jarFiles, paths);
 		}
 	}
 
-	private static void probeJar(@NotNull final JarFile jar) {
-		try {
+	private static void probeJar(@NotNull final Path jarPath) {
+		try (final JarFile jar = new JarFile(jarPath.toFile())) {
 			final String modLoader = detectModLoader(jar);
-			if (modLoader != null) {
-				System.err.println("[MixinLoader] Skipping " + jar.getName() + " — detected as a " + modLoader + " mod, not a Paper mixin plugin.");
+
+			final boolean isPaperMixin =
+				probeYamlConfig(jar, jarPath, "paper-plugin.yml") ||
+					probeYamlConfig(jar, jarPath, "plugin.yml") ||
+					probeJsonManifest(jar, jarPath, "ignite.mod.json") ||
+					probeJsonManifest(jar, jarPath, "horizon.plugin.json");
+			if (!isPaperMixin && modLoader != null) {
+				System.err.println("[MixinLoader] Skipping " + jarPath + " — detected as a " + modLoader + " mod, not a Paper mixin plugin.");
 				return;
 			}
-
-			final boolean ignored =
-					probeYamlConfig(jar, "paper-plugin.yml") ||
-							probeYamlConfig(jar, "plugin.yml") ||
-							probeIgnite(jar) ||
-							probeHorizon(jar) ||
-							probeOrigami(jar);
+			if (!isPaperMixin) probeOrigami(jar, jarPath);
 		} catch (final Exception e) {
-			System.err.println("[MixinLoader] Error probing " + jar.getName() + ": " + e.getMessage());
+			System.err.println("[MixinLoader] Error probing " + jarPath + ": " + e.getMessage());
 		}
 	}
 
@@ -114,7 +136,7 @@ public class PluginProber {
 	 * Our system: mixins listed in paper-plugin.yml / plugin.yml.
 	 * Access wideners come from those mixin JSON files (Fabric-like).
 	 */
-	private static boolean probeYamlConfig(@NotNull final JarFile jar, final String fileName) {
+	private static boolean probeYamlConfig(@NotNull final JarFile jar, final Path jarPath, final String fileName) {
 		final ZipEntry entry = jar.getEntry(fileName);
 		if (entry == null) return false;
 
@@ -123,7 +145,7 @@ public class PluginProber {
 			if (data != null && data.get("mixins") instanceof final List<?> mixinList) {
 				boolean found = false;
 				for (final Object config : mixinList) {
-					found |= addMixinConfig(jar, config.toString(), true);
+					found |= addMixinConfig(jar, jarPath, config.toString(), true);
 				}
 				return found;
 			}
@@ -133,23 +155,13 @@ public class PluginProber {
 		return false;
 	}
 
-	/** Ignite: ignite.mod.json → mixins[] + wideners[] */
-	private static boolean probeIgnite(@NotNull final JarFile jar) {
-		return probeJsonManifest(jar, "ignite.mod.json");
-	}
-
-	/** Horizon: horizon.plugin.json → mixins[] + wideners[] */
-	private static boolean probeHorizon(@NotNull final JarFile jar) {
-		return probeJsonManifest(jar, "horizon.plugin.json");
-	}
-
-	private static boolean probeJsonManifest(@NotNull final JarFile jar, final String fileName) {
+	private static boolean probeJsonManifest(@NotNull final JarFile jar, final Path jarPath, final String fileName) {
 		final ZipEntry entry = jar.getEntry(fileName);
 		if (entry == null) return false;
 
 		try (InputStreamReader reader = new InputStreamReader(jar.getInputStream(entry), StandardCharsets.UTF_8)) {
 			final JsonObject json = gson.fromJson(reader, JsonObject.class);
-			final boolean mixins = handleMixinList(jar, json.get("mixins"), false);
+			final boolean mixins = handleMixinList(jar, jarPath, json.get("mixins"), false);
 			final boolean wideners = handleWidenerList(jar, json.get("wideners"));
 			return mixins || wideners;
 		} catch (final Exception e) {
@@ -161,7 +173,7 @@ public class PluginProber {
 	/**
 	 * Origami: auto-detect every *.mixins.json and every *.aw / *.accesswidener / *.at
 	 */
-	private static boolean probeOrigami(@NotNull final JarFile jar) {
+	private static boolean probeOrigami(@NotNull final JarFile jar, final Path jarPath) {
 		boolean found = false;
 		final var entries = jar.entries();
 		while (entries.hasMoreElements()) {
@@ -169,7 +181,7 @@ public class PluginProber {
 			final String name = entry.getName();
 
 			if (name.endsWith(".mixins.json")) {
-				found |= addMixinConfig(jar, name, false);
+				found |= addMixinConfig(jar, jarPath, name, false);
 			} else if (isWidenerFile(name)) {
 				found |= loadAccessWidener(jar, name);
 			}
@@ -184,12 +196,17 @@ public class PluginProber {
 	}
 
 	@SuppressWarnings("SameParameterValue")
-    private static boolean handleMixinList(@NotNull final JarFile jar, final JsonElement mixinsElement, final boolean fabricStyleWideners) {
+    private static boolean handleMixinList(
+		@NotNull final JarFile jar,
+		final Path jarPath,
+		final JsonElement mixinsElement,
+		final boolean fabricStyleWideners
+	) {
 		if (mixinsElement == null || !mixinsElement.isJsonArray()) return false;
 
 		boolean found = false;
 		for (final JsonElement element : mixinsElement.getAsJsonArray()) {
-			found |= addMixinConfig(jar, element.getAsString(), fabricStyleWideners);
+			found |= addMixinConfig(jar, jarPath, element.getAsString(), fabricStyleWideners);
 		}
 		return found;
 	}
@@ -212,15 +229,33 @@ public class PluginProber {
 		return found;
 	}
 
-	private static boolean addMixinConfig(@NotNull final JarFile jar, final String configName, final boolean fabricStyleWideners) {
+	private static final AtomicLong SYNTHETIC_SEQ = new AtomicLong();
+
+	private static boolean addMixinConfig(
+		@NotNull final JarFile jar,
+		final Path jarPath,
+		final String configName,
+		final boolean fabricStyleWideners
+	) {
 		if (configName == null || configName.isEmpty()) return false;
 
+		String synthetic = null;
 		try {
-			ClassLoaderUtils.addURL(PaperMixinService.extraClassLoader, Path.of(jar.getName()).toUri().toURL());
+			ClassLoaderUtils.addURL(PaperMixinService.extraClassLoader, jarPath.toUri().toURL());   // class side: unchanged from today
 
-			Mixins.addConfiguration(configName);
-			System.out.println("[MixinLoader] Added mixin config: " + configName);
+			// Serve this jar's config bytes under a unique name — same-named configs
+			// from different jars can never shadow each other.
+			final byte[] configBytes = readEntry(jar, configName);
+			if (configBytes != null) {
+				synthetic = "__ml_" + SYNTHETIC_SEQ.incrementAndGet() + "_" + configName;
+				final byte[] rewritten = rewriteRefmap(jar, configBytes);
+				PaperMixinService.syntheticMappers.put(synthetic, rewritten != null ? rewritten : configBytes);
+			}
+
+			Mixins.addConfiguration(synthetic != null ? synthetic : configName);
+			System.out.println("[MixinLoader] Added mixin config: " + configName + (synthetic != null ? " (as " + synthetic + ")" : ""));
 		} catch (final Exception e) {
+			if (synthetic != null) PaperMixinService.syntheticMappers.remove(synthetic);   // no stale entry behind a closed loader
 			System.err.println("[MixinLoader] Failed to add config " + configName + ": " + e.getMessage());
 			return false;
 		}
@@ -229,6 +264,41 @@ public class PluginProber {
 			probeAccessWidenerFromMixinConfig(jar, configName);
 		}
 		return true;
+	}
+
+	/** Reads an entry's bytes; null if absent or unreadable. */
+	private static byte[] readEntry(@NotNull final JarFile jar, final String entryName) {
+		try {
+			final ZipEntry entry = jar.getEntry(entryName);
+			if (entry == null) return null;
+			try (InputStream in = jar.getInputStream(entry)) {
+				return in != null ? in.readAllBytes() : null;
+			}
+		} catch (final IOException e) { return null; }
+	}
+
+	/**
+	 * If the config declares "refmap", rewrites it to a unique synthetic name and
+	 * serves this jar's refmap bytes under that name. Returns the rewritten config
+	 * bytes, the original bytes when there is no refmap, or null if unparseable
+	 * (caller then falls back to raw bytes).
+	 */
+	private static byte[] rewriteRefmap(@NotNull final JarFile jar, final byte[] configBytes) {
+		try {
+			final JsonObject json = gson.fromJson(new String(configBytes, StandardCharsets.UTF_8), JsonObject.class);
+			if (json == null || !json.has("refmap") || !json.get("refmap").isJsonPrimitive()) return configBytes;
+
+			final String refmapName = json.get("refmap").getAsString();
+			final byte[] refmapBytes = readEntry(jar, refmapName);
+			if (refmapBytes == null) return configBytes;   // nothing to serve; keep original name, mixin warns as usual
+
+			final String syntheticRefmap = "__ml_" + SYNTHETIC_SEQ.incrementAndGet() + "_" + refmapName;
+			PaperMixinService.syntheticMappers.put(syntheticRefmap, refmapBytes);
+			json.addProperty("refmap", syntheticRefmap);
+			return gson.toJson(json).getBytes(StandardCharsets.UTF_8);
+		} catch (final Exception e) {
+			return null;   // caller falls back to raw bytes
+		}
 	}
 
 	/** Fabric-like: mixin JSON may declare "accessWidener" / "accessWideners". */

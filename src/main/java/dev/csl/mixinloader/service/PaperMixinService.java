@@ -9,12 +9,17 @@ import dev.csl.mixinloader.MixinTransformer;
 import dev.csl.mixinloader.PaperMixinLogger;
 import dev.csl.mixinloader.util.ClassLoaderUtils;
 import dev.csl.mixinloader.util.SneakyExceptions;
+
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URL;
 import java.net.URLClassLoader;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.tree.ClassNode;
 import org.spongepowered.asm.launch.platform.container.ContainerHandleVirtual;
@@ -28,7 +33,8 @@ import org.spongepowered.asm.util.ReEntranceLock;
 @AutoService(IMixinService.class)
 public class PaperMixinService implements IMixinService, IClassProvider, IClassBytecodeProvider {
 	public static final URLClassLoader minecraftClassLoader;
-	public static final URLClassLoader extraClassLoader = new URLClassLoader(new URL[0], ClassLoader.getSystemClassLoader());
+	public static final URLClassLoader extraClassLoader = URLClassLoader.newInstance(new URL[]{MixinLoader.class.getProtectionDomain().getCodeSource().getLocation()}, ClassLoader.getSystemClassLoader());
+	public static final Map<String, byte[]> syntheticMappers = new ConcurrentHashMap<>();
 
 	static {
 		URLClassLoader tempMinecraftClassLoader;
@@ -76,7 +82,9 @@ public class PaperMixinService implements IMixinService, IClassProvider, IClassB
 
 	@Override
 	public InputStream getResourceAsStream(final String name) {
-		InputStream is = extraClassLoader.getResourceAsStream(name);
+		final byte[] synthetic = syntheticMappers.get(name);
+		if (synthetic != null) return new ByteArrayInputStream(synthetic);
+		InputStream is = extraClassLoader.getResourceAsStream(name);   // ← restore: jars are added here again
 		if (is != null) return is;
 		is = minecraftClassLoader.getResourceAsStream(name);
 		if (is != null) return is;

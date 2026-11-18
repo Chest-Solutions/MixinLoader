@@ -1,37 +1,26 @@
 package dev.csl.mixinloader;
 
 import static dev.csl.mixinloader.Proxies.MIXIN_ENVIRONMENT;
-import static net.bytebuddy.matcher.ElementMatchers.is;
 import static net.bytebuddy.matcher.ElementMatchers.isConstructor;
-import static net.bytebuddy.matcher.ElementMatchers.isSubTypeOf;
-import static net.bytebuddy.matcher.ElementMatchers.nameContains;
 import static net.bytebuddy.matcher.ElementMatchers.nameEndsWith;
 import static net.bytebuddy.matcher.ElementMatchers.nameMatches;
 import static net.bytebuddy.matcher.ElementMatchers.named;
 import static net.bytebuddy.matcher.ElementMatchers.none;
 
 import com.llamalad7.mixinextras.MixinExtrasBootstrap;
-import dev.csl.mixinloader.MixinLoader.FindClassMissVisitor;
-import dev.csl.mixinloader.service.PaperMixinService;
-import dev.csl.mixinloader.util.ClassLoaderUtils;
-import dev.csl.mixinloader.util.SneakyExceptions;
-import jdk.internal.loader.ClassLoaders;
 
-import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.lang.instrument.Instrumentation;
 import java.lang.invoke.MethodHandles;
-import java.net.URL;
 import java.net.URLClassLoader;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.NamespaceRegistry;
 import java.util.Set;
-import java.util.jar.JarFile;
+
 import net.bytebuddy.agent.builder.AgentBuilder;
 import net.bytebuddy.asm.Advice;
 import net.bytebuddy.asm.AsmVisitorWrapper;
@@ -39,12 +28,10 @@ import net.bytebuddy.description.field.FieldDescription;
 import net.bytebuddy.description.field.FieldList;
 import net.bytebuddy.description.method.MethodList;
 import net.bytebuddy.description.type.TypeDescription;
+import net.bytebuddy.dynamic.ClassFileLocator;
 import net.bytebuddy.dynamic.loading.ClassInjector;
 import net.bytebuddy.implementation.Implementation;
-import net.bytebuddy.jar.asm.ClassReader;
-import net.bytebuddy.jar.asm.ClassVisitor;
-import net.bytebuddy.jar.asm.ClassWriter;
-import net.bytebuddy.jar.asm.MethodVisitor;
+import net.bytebuddy.jar.asm.*;
 import net.bytebuddy.pool.TypePool;
 import org.jetbrains.annotations.NotNull;
 import org.objectweb.asm.Opcodes;
@@ -52,8 +39,21 @@ import org.spongepowered.asm.launch.MixinBootstrap;
 import org.spongepowered.asm.mixin.MixinEnvironment;
 
 public class MixinLoader {
+	/**
+	 * TypePool resolution during transformation looks up referenced classes through the
+	 * instrumented class's own classloader. Plugin classloaders are plain URLClassLoaders
+	 * over plugin jars and cannot see JDK module classes (jrt:), so redefining any
+	 * plugin-bundled {@code *ClassLoader} class (e.g. LuckPerms' JarInJarClassLoader)
+	 * failed with {@code NoSuchTypeException: Cannot resolve type description for
+	 * java.net.URLClassLoader} and the transformation was aborted. The boot loader's
+	 * locator reads java.base class files, so it serves as the fallback.
+	 */
+	private static final AgentBuilder.LocationStrategy JDK_AWARE_POOL =
+		AgentBuilder.LocationStrategy.ForClassLoader.WEAK
+			.withFallbackTo(ClassFileLocator.ForClassLoader.ofBootLoader());
+
 	public static class PostSuperVisitor extends AsmVisitorWrapper.AbstractBase {
-		private final class ClassVisitorExtension extends ClassVisitor {
+		private static final class ClassVisitorExtension extends ClassVisitor {
 			private ClassVisitorExtension(int api, ClassVisitor classVisitor) { super(api, classVisitor); }
 
 			@Override
@@ -93,7 +93,7 @@ public class MixinLoader {
 							super.visitVarInsn(Opcodes.ALOAD, 0);
 							super.visitMethodInsn(
 								Opcodes.INVOKESTATIC,
-								"dev/csl/mixinloader/MixinLoader",
+								"java/util/NamespaceRegistry",
 								"register",
 								"(Ljava/net/URLClassLoader;)V",
 								false
@@ -120,13 +120,13 @@ public class MixinLoader {
 
 	public static final class FindClassMissVisitor extends AsmVisitorWrapper.AbstractBase {
 		@Override
-		public ClassVisitor wrap(
-			TypeDescription type,
-			ClassVisitor visitor,
-			Implementation.Context context,
-			TypePool typePool,
-			FieldList<FieldDescription.InDefinedShape> fields,
-			MethodList<?> methods,
+		public @NotNull ClassVisitor wrap(
+			@NotNull TypeDescription type,
+			@NotNull ClassVisitor visitor,
+			@NotNull Implementation.Context context,
+			@NotNull TypePool typePool,
+			@NotNull FieldList<FieldDescription.InDefinedShape> fields,
+			@NotNull MethodList<?> methods,
 			int writerFlags,
 			int readerFlags
 		) {
@@ -141,41 +141,46 @@ public class MixinLoader {
 				) {
 					MethodVisitor mv = super.visitMethod(access, name, descriptor, signature, exceptions);
 
-					if (
-						mv == null &&
-						name.equals("findClass") &&
-						descriptor.equals("(Ljava/lang/String;)Ljava/lang/Class;")
-					) return mv;
+					if (mv == null || !(name.equals("findClass") &&
+						descriptor.equals("(Ljava/lang/String;)Ljava/lang/Class;"))) {
+						return mv;
+					}
 
 					return new MethodVisitor(Opcodes.ASM9, mv) {
 						@Override
 						public void visitInsn(int opcode) {
-							if (
-								opcode == Opcodes.ATHROW &&
-								exceptions != null &&
-								(
-									exceptions[0].contains("ClassNotFoundException") ||
-									exceptions[0].contains("NoClassDefFoundError")
-								)
-							) {
-								// Stack: [ Original Throwable ]
-								super.visitInsn(Opcodes.POP); // Clear stack: [ ]
-
-								super.visitVarInsn(Opcodes.ALOAD, 0); // Load `this` (requester ClassLoader)
-								super.visitVarInsn(Opcodes.ALOAD, 1); // Load `name` (String)
-								super.visitMethodInsn(
-									Opcodes.INVOKESTATIC,
-									"java/util/NamespaceRegistry",
-									"findClassFromNamespaceRegistry",
-									"(Ljava/lang/ClassLoader;Ljava/lang/String;)Ljava/lang/Class;",
-									false
-								); // Stack: [ Class<?> ]
-
-								super.visitInsn(Opcodes.ARETURN);
+							if (opcode != Opcodes.ATHROW) {
+								super.visitInsn(opcode);
 								return;
 							}
 
-							super.visitInsn(opcode);
+							// Stack: [throwable]
+							Label fallback = new Label();
+
+							super.visitInsn(Opcodes.DUP);
+							super.visitTypeInsn(Opcodes.INSTANCEOF, "java/lang/ClassNotFoundException");
+							super.visitJumpInsn(Opcodes.IFNE, fallback);
+
+							super.visitInsn(Opcodes.DUP);
+							super.visitTypeInsn(Opcodes.INSTANCEOF, "java/lang/NoClassDefFoundError");
+							super.visitJumpInsn(Opcodes.IFNE, fallback);
+
+							// Neither type: preserve the original throw.
+							super.visitInsn(Opcodes.ATHROW);
+
+							super.visitLabel(fallback);
+							// Stack: [throwable]
+							super.visitInsn(Opcodes.POP);
+							super.visitVarInsn(Opcodes.ALOAD, 0);
+							super.visitVarInsn(Opcodes.ALOAD, 1);
+							super.visitMethodInsn(
+								Opcodes.INVOKESTATIC,
+								"java/util/NamespaceRegistry",
+								"findClassFromNamespaceRegistry",
+								"(Ljava/lang/ClassLoader;Ljava/lang/String;)Ljava/lang/Class;",
+								false
+							);
+							super.visitInsn(Opcodes.ARETURN);
 						}
 					};
 				}
@@ -205,6 +210,7 @@ public class MixinLoader {
 
 		new AgentBuilder.Default()
 			.disableClassFormatChanges()
+			.with(JDK_AWARE_POOL)
 			.type(named("org.bukkit.plugin.java.PluginClassLoader"))
 			.transform((builder, typeDescription, classLoader, module, protectionDomain) -> builder.visit(new PostSuperVisitor()))
 			.with(AgentBuilder.Listener.StreamWriting.toSystemError().withErrorsOnly())
@@ -212,6 +218,7 @@ public class MixinLoader {
 
 		new AgentBuilder.Default()
 			.disableClassFormatChanges()
+			.with(JDK_AWARE_POOL)
 			.type(
 				nameMatches(
 					"^io\\.papermc\\.paper\\.plugin\\.(?:entrypoint|provider)\\.classloader\\.Paper(?:Simple)?PluginClassLoader$"
@@ -223,19 +230,13 @@ public class MixinLoader {
 
 		new AgentBuilder.Default()
 			.disableClassFormatChanges()
+			.with(JDK_AWARE_POOL)
 			.with(AgentBuilder.RedefinitionStrategy.RETRANSFORMATION)
 			.ignore(none())
 			.type(nameEndsWith("ClassLoader"))
 			.transform((builder, type, loader, module, pd) -> builder.visit(new FindClassMissVisitor()))
 			.with(AgentBuilder.Listener.StreamWriting.toSystemError().withErrorsOnly())
 			.installOn(inst);
-
-		SneakyExceptions.run(() ->
-			ClassLoaderUtils.addURL(
-				PaperMixinService.extraClassLoader,
-				MixinLoader.class.getProtectionDomain().getCodeSource().getLocation().toURI().toURL()
-			)
-		);
 
 		MixinBootstrap.init();
 		inst.addTransformer(new MixinTransformer(), true);
@@ -246,46 +247,8 @@ public class MixinLoader {
 	}
 
 	@Advice.OnMethodExit
-	@SuppressWarnings("unused")
 	public static void register(@Advice.This final URLClassLoader loader) {
-		if (loader == null) return;
-		try {
-			for (final URL jarUrl : loader.getURLs()) {
-				File jarFile;
-
-				if ("jar".equals(jarUrl.getProtocol())) {
-					String path = jarUrl.getPath();
-					final int bang = path.indexOf("!/");
-					if (bang != -1) path = path.substring(0, bang);
-					jarFile = new File(new URL(path).toURI());
-				} else {
-					jarFile = new File(jarUrl.toURI());
-				}
-
-				if (!jarFile.exists() || !jarFile.isFile()) continue;
-				try (JarFile jar = new JarFile(jarFile)) {
-					final var entries = jar.entries();
-
-					while (entries.hasMoreElements()) {
-						final var entry = entries.nextElement();
-						final String name = entry.getName();
-
-						if (name.endsWith(".class") && name.contains("/")) {
-							final String pkg = name
-								.substring(0, name.lastIndexOf('/'))
-								.replace('/', '.');
-
-							NamespaceRegistry.NAMESPACE_REGISTRY.put(
-								pkg,
-								loader
-							);
-						}
-					}
-				}
-			}
-		} catch (final Throwable t) {
-			System.err.println("[MixinLoader] Failed to register plugin classloader ID: " + t);
-		}
+		NamespaceRegistry.register(loader);
 	}
 
 	public static void openInternals(
