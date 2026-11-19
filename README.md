@@ -11,7 +11,7 @@ MixinLoader removes that barrier. It adds itself to the JVM as a Java agent. It 
 ## Features
 
 - **No startup changes.** The plugin relaunches the JVM with itself as a `-javaagent`. You do not touch `start.sh` or `start.bat`.
-- **Loads plugins from other Mixin loaders.** Mixin plugins built for Ignite, Horizon, and Origami work. See Supported and unsupported.
+- **Loads plugins from other Mixin loaders.** Mixin plugins built for Ignite, Horizon, and Origami work. See [Supported and unsupported.](#supported-and-unsupported)
 - **Works with both plugin systems.** The loader instruments the legacy `org.bukkit.plugin.java.PluginClassLoader` and the modern `io.papermc.paper.plugin.provider.classloader.PaperPluginClassLoader`.
 - **Access Wideners.** A plugin can ship widener files in its JAR, and the loader applies them without extra setup.
 - **MixinExtras included.** The loader starts MixinExtras automatically, so advanced Mixin features work.
@@ -25,7 +25,7 @@ MixinLoader removes that barrier. It adds itself to the JVM as a Java agent. It 
 
 ## Install
 
-1. Download the newest `MixinLoader-<version>.jar` from the Releases page.
+1. Download the newest `MixinLoader-<version>.jar` from the [Releases](https://github.com/Chest-Solutions/MixinLoader/releases/latest) page.
 2. Copy the JAR into the `plugins/` folder of your server.
 3. Start the server with your usual command:
 
@@ -33,11 +33,10 @@ MixinLoader removes that barrier. It adds itself to the JVM as a Java agent. It 
     java -jar server.jar
     ```
 
-The server restarts once during startup. This is normal. The plugin sees that the JVM has no agent attached. It closes the listening sockets of the server, relaunches the JVM with `-javaagent`, and exits.
-
-The close step matters. If the old JVM kept the port, the new JVM would fail with `java.net.BindException: Address already in use`.
-
-To skip the restart, attach the agent yourself:
+> [!NOTE]
+> The server restarts once during startup, This is normal.
+> This is required for the plugin to make itself a java agent.
+> To skip the restart, attach the agent manually:
 
 ```bash
 java -javaagent:plugins/MixinLoader-<version>.jar -jar server.jar
